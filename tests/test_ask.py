@@ -4,6 +4,7 @@ import json
 import os
 import runpy
 import subprocess
+import sys
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -12,6 +13,7 @@ from unittest.mock import patch
 
 
 ASK = Path(__file__).resolve().parents[1] / "bin" / "ask"
+ASK_CMD = ASK.with_suffix(".cmd")
 ASK_MODULE = runpy.run_path(str(ASK))
 
 
@@ -73,7 +75,7 @@ class AskTests(unittest.TestCase):
         env = os.environ.copy()
         env.update(extra_env)
         return subprocess.run(
-            [str(ASK), *args],
+            [sys.executable, str(ASK), *args],
             text=True,
             capture_output=True,
             env=env,
@@ -131,12 +133,33 @@ class AskTests(unittest.TestCase):
 
     def test_prompt_detects_linux_flavour_and_shell(self) -> None:
         release = {"PRETTY_NAME": "Fedora Linux 42", "NAME": "Fedora Linux"}
-        with patch("platform.freedesktop_os_release", return_value=release):
-            with patch.dict(os.environ, {"SHELL": "/usr/bin/fish"}, clear=False):
-                instructions = ASK_MODULE["system_instructions"]()
+        with patch.object(sys, "platform", "linux"):
+            with patch("platform.freedesktop_os_release", return_value=release):
+                with patch.dict(os.environ, {"SHELL": "/usr/bin/fish"}, clear=False):
+                    instructions = ASK_MODULE["system_instructions"]()
         self.assertIn("Fedora Linux 42", instructions)
         self.assertIn("interactive shell is fish", instructions)
         self.assertNotIn("Arch Linux", instructions)
+
+    def test_prompt_defaults_to_cmd_on_windows(self) -> None:
+        environment = {"ASK_SHELL": "", "SHELL": "", "COMSPEC": r"C:\Windows\System32\cmd.exe"}
+        with patch.object(sys, "platform", "win32"):
+            with patch.dict(os.environ, environment, clear=False):
+                instructions = ASK_MODULE["system_instructions"]()
+        self.assertIn("for Windows", instructions)
+        self.assertIn("interactive shell is cmd", instructions)
+        self.assertIn("one cmd-compatible command line", instructions)
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows CMD launcher test")
+    def test_cmd_launcher(self) -> None:
+        result = subprocess.run(
+            [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/c", str(ASK_CMD), "--version"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "ask 1.1.0")
 
     def test_missing_prompt_is_usage_error(self) -> None:
         result = self.run_ask("--provider", "codex")
