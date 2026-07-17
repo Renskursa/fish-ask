@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import platform
+import shutil
 import subprocess
 import sys
 import threading
@@ -21,13 +22,32 @@ VERSION = "1.1.0"
 SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
 
+if sys.platform == "win32":
+    SPINNER_FRAMES = ("|", "/", "-", chr(92))
+
+
 class AskError(RuntimeError):
     """An actionable backend error."""
 
 
+def interactive_shell() -> str:
+    """Return the command syntax that should be generated for this session."""
+    configured = os.environ.get("ASK_SHELL") or os.environ.get("SHELL")
+    if not configured and sys.platform == "win32":
+        configured = os.environ.get("COMSPEC", "cmd.exe")
+    if not configured:
+        return "fish"
+
+    name = os.path.basename(configured.replace(chr(92), "/")).lower()
+    for suffix in (".exe", ".cmd", ".bat"):
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return name
+
+
 def system_instructions() -> str:
     """Build the command prompt from the current OS and interactive shell."""
-    shell = os.path.basename(os.environ.get("SHELL", "")) or "fish"
+    shell = interactive_shell()
     if sys.platform.startswith("linux"):
         try:
             release = platform.freedesktop_os_release()
@@ -139,8 +159,29 @@ def terminate(process: subprocess.Popen[str]) -> None:
         process.kill()
 
 
+def executable_command(name: str, *args: str) -> list[str]:
+    """Resolve a CLI, including Windows batch launchers that CreateProcess cannot run."""
+    executable = shutil.which(name)
+    if executable is None:
+        raise AskError(f"{name} is not installed or is not in PATH")
+
+    command = [executable, *args]
+    if sys.platform == "win32" and os.path.splitext(executable)[1].lower() in {".bat", ".cmd"}:
+        return [
+            os.environ.get("COMSPEC", "cmd.exe"),
+            "/d",
+            "/s",
+            "/c",
+            subprocess.list2cmdline(command),
+        ]
+    return command
+
+
 def codex_stream(prompt: str, model: str | None) -> Iterator[str]:
-    command = ["codex", "app-server", "--stdio"]
+    command = executable_command("codex", "app-server", "--stdio")
+    process_options: dict[str, object] = {}
+    if sys.platform != "win32":
+        process_options["start_new_session"] = True
     try:
         process = subprocess.Popen(
             command,
@@ -148,8 +189,9 @@ def codex_stream(prompt: str, model: str | None) -> Iterator[str]:
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
+            encoding="utf-8",
             bufsize=1,
-            start_new_session=True,
+            **process_options,
         )
     except FileNotFoundError as exc:
         raise AskError("codex is not installed or is not in PATH") from exc
